@@ -1,0 +1,438 @@
+# Camera Declaration
+import cv2
+import numpy as np
+from picamera2 import Picamera2
+import libcamera
+
+# Motors Declaration
+import RPi.GPIO as GPIO
+import time
+from time import sleep
+
+# Pin Variables Declaration
+in4 = 24  # R Front
+in3 = 23  # R Back
+en2 = 25  # R EN
+in1 = 17  # L Front
+in2 = 27  # L Back
+en1 = 22  # L EN
+temp1 = 1
+
+# Variables Declaration
+left = None
+right = None
+
+# Pins Definition
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(in1, GPIO.OUT)
+GPIO.setup(in2, GPIO.OUT)
+GPIO.setup(in3, GPIO.OUT)
+GPIO.setup(in4, GPIO.OUT)
+GPIO.setup(en1, GPIO.OUT)
+GPIO.setup(en2, GPIO.OUT)
+
+# PWM Definition
+p1 = GPIO.PWM(en1, 1000)
+p2 = GPIO.PWM(en2, 1000)
+p1.start(0)
+p2.start(0)
+GPIO.setwarnings(False)
+
+#Shape Detection Variables
+# Initialize variables to store the previous centroid positions
+prev_centroid_x = 0
+prev_centroid_y = 0
+tip_y = 0
+# Initialize a list to store the previous centroid positions for smoothing
+centroid_history = []
+# Number of previous positions to consider for smoothing
+history_length = 500
+
+def shapeDetection(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Perform edge detection
+    edges = cv2.Canny(blur, 50, 150)
+
+    # Find contours
+    contours, _ = cv2.findContours(edges.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Classifying shapes
+    for contour in contours:
+        epsilon = 0.02 * cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        vertices = len(approx)
+
+        area = cv2.contourArea(contour)
+        if area > 800:
+            if vertices == 7:
+                shape = ""
+                arrowDetection(image)
+            else:
+                shape = Shapes(image)
+
+            cv2.drawContours(image, [approx], 0, (0, 255, 0), 2)
+            cv2.putText(image, shape, (approx[0][0][0], approx[0][0][1] + 5), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+
+            # Display the image
+            # cv2.imshow("Shapes Detected", image)
+            # cv2.imshow("Edges",edges)
+
+def Shapes(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Perform edge detection
+    edges = cv2.Canny(blur, 50, 150)
+
+    # Find contours
+    contours, _ = cv2.findContours(edges.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Classifying shapes
+    for contour in contours:
+        epsilon = 0.02 * cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        vertices = len(approx)
+        area = cv2.contourArea(contour)
+        if area > 800:
+        
+            if vertices == 3:
+                shape = "Triangle"
+                    
+            elif vertices == 4:
+                (x, y, w, h) = cv2.boundingRect(approx)
+                ar = w / float(h)
+                if ar >= 0.95 and ar <= 1.05:
+                    shape = "square"
+                else:
+                    shape = "rectangle"
+
+            elif vertices == 5:
+                shape = "Pentagon"
+
+            elif vertices == 6:
+                shape = "Hexagon"
+
+            elif vertices == 8:
+                (x, y, w, h) = cv2.boundingRect(approx)
+                ar = w / float(h)
+                shape = "circle" if ar >= 0.995 and ar <= 1.02 else "Partial Circle"
+                print(ar)
+            
+            else:
+                shape = ""
+                
+            cv2.drawContours(image, [approx], 0, (0, 255, 0), 2)
+            cv2.putText(image, shape, (approx[0][0][0], approx[0][0][1] + 5), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+        
+            return shape
+
+def findCentroid():
+    global prev_centroid_x, prev_centroid_y, centroid_history
+
+    # Add current centroid position to history
+    centroid_history.append((curr_centroid_x, curr_centroid_y))
+
+    # Truncate history to keep only the last 'history_length' positions
+    centroid_history = centroid_history[-history_length:]
+
+# Calculate the average centroid position over the history
+    avg_centroid_x = sum(x for x, _ in centroid_history) / len(centroid_history)
+    avg_centroid_y = sum(y for _, y in centroid_history) / len(centroid_history)
+
+    # Calculate the displacement of the centroid
+    delta_x = avg_centroid_x - prev_centroid_x
+    delta_y = avg_centroid_y - prev_centroid_y
+
+    # Update the previous centroid position for the next iteration
+    prev_centroid_x = avg_centroid_x
+    prev_centroid_y = avg_centroid_y
+
+
+def find_arrow_tip(contour, centroid, prev_centroid_x, prev_centroid_y):
+    # Calculate Euclidean distances between centroid and contour points
+    distances = [np.linalg.norm(point - centroid) for point in contour]
+
+    # Find the index of the point with the maximum distance
+    tip_index = np.argmax(distances)
+
+    # If the distance from the previous centroid to the tip is shorter, use the previous centroid
+    prev_tip_distance = np.linalg.norm(contour[tip_index][0] - (prev_centroid_x, prev_centroid_y))
+    current_tip_distance = distances[tip_index]
+
+    if prev_tip_distance < current_tip_distance:
+        tip_coordinate = (prev_centroid_x, prev_centroid_y)
+    else:
+        # Return the coordinates of the tip
+        tip_coordinate = tuple(contour[tip_index][0])
+
+    # Limit the x value of the tip coordinate within 5 units of prev_centroid_x
+    tip_x = tip_coordinate[0]
+    # Update the tip coordinate with the limited x value
+    tip_coordinate = (int(tip_x), int(tip_coordinate[1]))
+
+    return tip_coordinate
+
+def arrowDetection(img):
+    # Convert the image to grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Apply Gaussian blur to reduce noise
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Perform edge detection using Canny
+    edges = cv2.Canny(blurred, 50, 150)
+
+    # Find contours in the edge-detected image
+    contours, _ = cv2.findContours(edges.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Loop over the contours
+    for contour in contours:
+        M = cv2.moments(contour)
+        if M["m00"] != 0:
+            cx = int(M['m10'] / M['m00'])
+            cy = int(M['m01'] / M['m00'])
+
+        area = cv2.contourArea(contour)
+        if area > 400:
+            # Approximate the contour to reduce the number of points
+            epsilon = 0.02 * cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+
+            # Check if the contour is an arrow shape (has 7 vertices)
+            if len(approx) == 7:
+
+                # Compute the orientation of the arrow
+                x_coords = [point[0][0] for point in approx]
+                y_coords = [point[0][1] for point in approx]
+                x_diff = max(x_coords) - min(x_coords)
+                y_diff = max(y_coords) - min(y_coords)
+
+                # finding coordinate of arrow tip
+                coordinate = find_arrow_tip(contour, (cx, cy), prev_centroid_x, prev_centroid_y)
+                tip_x = coordinate[0]
+                tip_y = coordinate[1]
+
+                dx = approx[6][0][0] - approx[0][0][0]
+                dy = approx[6][0][1] - approx[0][0][1]
+
+                if x_diff > y_diff:  # Horizontal arrow
+                    orientation = "Left" if approx[6][0][0] > approx[0][0][0] else "Right"
+                    cv2.putText(img, orientation, (approx[0][0][0], approx[0][0][1] - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+                    head_point = (approx[0][0][0], approx[0][0][1])
+                    cv2.circle(img, head_point, 5, (0, 0, 255), -1)
+
+                else:  # Vertical arrow
+
+                    if tip_y < 150:
+                        orientation = "Up"
+                        cv2.putText(img, orientation, (tip_x, tip_y - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                        head_point = (tip_x, tip_y)
+                        cv2.circle(img, head_point, 5, (0, 0, 255), -1)
+
+else:  # If slope is negative, arrow points upwards
+                        orientation = "Down"
+                        cv2.putText(img, orientation, (tip_x, tip_y - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                        head_point = (tip_x, tip_y)
+                        cv2.circle(img, head_point, 5, (0, 0, 255), -1)
+
+                    print(coordinate)
+
+# User Defined Function for Ease of Control
+def run(left, right):
+    if left < 0:
+        GPIO.output(in1, GPIO.LOW)
+        GPIO.output(in2, GPIO.HIGH)
+        left = 0 - left
+    else:
+        GPIO.output(in1, GPIO.HIGH)
+        GPIO.output(in2, GPIO.LOW)
+    if right < 0:
+        GPIO.output(in4, GPIO.LOW)
+        GPIO.output(in3, GPIO.HIGH)
+        right = 0 - right
+    else:
+        GPIO.output(in4, GPIO.HIGH)
+        GPIO.output(in3, GPIO.LOW)
+
+    p1.start(left)
+    p2.start(right)
+
+
+Your_color = "Black"
+counter = 0
+isDetected = 0
+
+def detect_single_color(imageFrame, color_name, lower_range, upper_range, color_display, counter, isDetected):
+    hsvFrame = cv2.cvtColor(imageFrame, cv2.COLOR_BGR2HSV)
+    color_mask = cv2.inRange(hsvFrame, lower_range, upper_range)
+
+    kernel = np.ones((50, 50), "uint8")
+    color_mask = cv2.dilate(color_mask, kernel)
+    result = cv2.bitwise_and(imageFrame, imageFrame, mask=color_mask)
+
+    contours, hierarchy = cv2.findContours(color_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+    if len(contours) > 0:
+        c = max(contours, key=cv2.contourArea)
+        M = cv2.moments(c)
+        
+
+        if M["m00"] != 0:
+            cx = int(M['m10'] / M['m00'])
+            cy = int(M['m01'] / M['m00'])
+            #print("CX : " + str(cx) + "  CY : " + str(cy))
+            
+            dspeed = 60
+            
+            if cx < 240 and cx > 180:
+                #print("On Track!")
+                run(35, 35)
+
+
+            elif cx <= 180 and cx > 100:
+                #print("Turn Slight Left")
+                run(0,60)
+                # time.sleep(0.2)
+
+            elif cx >= 240 and cx < 320:
+                #print("Turn Slight Right")
+                run(dspeed, 0)
+                # time.sleep(0.2)
+
+            elif cx <= 100:  # Big turn left
+                
+                run(-60 , 60)
+                #print("Big turn left")
+                # time.sleep(0.2)
+
+            elif cx >= 320:  # big turn right
+                
+                run(dspeed, -dspeed)
+                #print("Big turn right")
+                #time.sleep(0.1)
+
+            cv2.circle(imageFrame, (cx, cy), 10, color_display, -1)
+
+
+    else:
+        #print("I don't see", color_name)
+        isDetected = 0
+        return imageFrame, color_mask, counter, isDetected
+
+
+    for pic, contour in enumerate(contours):
+        area = cv2.contourArea(contour)
+        if area > 150:
+            x, y, w, h = cv2.boundingRect(contour)  # returns x,y coordinate, width and height
+            imageFrame = cv2.rectangle(imageFrame, (x, y), (x + w, y + h), color_display, 2)
+            # cv2.putText(imageFrame, f"{color_name} Colour", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color_display)
+    isDetected = 1
+    return imageFrame, color_mask, counter, isDetected
+
+
+# Initialize PiCamera
+picam2 = Picamera2()
+picam2.preview_configuration.main.size = (450, 320)  # adjust display size
+picam2.preview_configuration.main.format = "RGB888"
+# picam2.preview_configuration.align()
+
+preview_config = picam2.create_preview_configuration()
+# preview_config["transform"] = libcamera.Transform(hflip=1, vflip=1)
+picam2.configure(preview_config)
+
+picam2.configure("preview")
+picam2.start()
+
+# Define your color range
+#qmy_color_lower = np.array([0, 0, 0], np.uint8)
+#my_color_upper = np.array([60, 60, 60], np.uint8)
+
+
+def colourChoice(choice, im, counter, isDetected):
+    
+
+    if choice == "red":
+        lower_range = np.array([0, 63, 0], np.uint8)
+        upper_range = np.array([16, 231, 203], np.uint8)
+
+elif choice == "blue":
+        lower_range = np.array([93,1180, 0], np.uint8)
+        upper_range = np.array([125, 255, 255], np.uint8)
+
+    elif choice == "green":
+        lower_range = np.array([58, 118, 89], np.uint8)
+        upper_range = np.array([73, 255, 255], np.uint8)
+
+    elif choice == "yellow":
+        lower_range = np.array([13, 147, 0], np.uint8)
+        upper_range = np.array([27, 255, 255], np.uint8)
+        
+    elif choice == "black":
+        lower_range = np.array([52, 15, 0], np.uint8)
+        upper_range = np.array([80, 255, 67], np.uint8)
+
+    result_frame, color_mask, counter, isDetected = detect_single_color(im, choice, lower_range, upper_range, (0, 255, 0),
+                                                                      counter, isDetected)
+    return lower_range, upper_range, result_frame, counter, isDetected
+
+
+# Start a while loop
+while True:
+    im = picam2.capture_array()
+    imShape = im.copy()
+    
+    shapeDetection(imShape)
+    
+    if counter == 0:
+        # Example: Detecting your specified color, Red
+        (lower_range, upper_range, result_frame, counter, isDetected) = colourChoice("blue", im, counter, isDetected)
+        if isDetected == 1:
+            counter = 0
+        else:
+            counter = 1
+    
+    elif counter == 1:
+        # Example: Detecting your specified color, Red
+        (lower_range, upper_range, result_frame, counter, isDetected) = colourChoice("yellow", im, counter, isDetected)
+        if isDetected == 1:
+            print("yesy")
+            counter = 1
+        else:
+            print("noy")
+            counter = 2
+            
+    elif counter == 2:
+        # Example: Detecting your specified color, Red
+        (lower_range, upper_range, result_frame, counter, isDetected) = colourChoice("black", im, counter, isDetected)
+        if isDetected == 1:
+            counter = 0
+            #print(counter, "yblack")
+        else:
+            counter = 3
+            print(counter)
+
+    else:
+        counter = 0
+        run(-50, -50)
+        time.sleep(0.1)
+        run(0, 0)
+        time.sleep(0.1)
+        #print("back")
+        counter = 0
+    
+    # Program Termination
+    cv2.imshow("Single Color Detection in Real-Time", result_frame)
+    cv2.imshow("Shape Detection",imShape)
+
+    if cv2.waitKey(10) & 0xFF == ord('q'):
+        picam2.stop()
+        cv2.destroyAllWindows()
+        GPIO.cleanup()
+        print("\n Script ended and memory cleaned")
+        break
